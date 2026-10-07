@@ -2,7 +2,7 @@ name: Native Benchmark Smoke
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "[0-9]+.[0-9]+.x"]
 
 permissions:
   contents: read

@@ -1,11 +1,12 @@
 name: Release
 
-# A push to main releases when it raises the version in packages/core/package.json: a "Release vX.Y.Z"
-# commit, pushed by `bun run release` or merged from the pull request that the release button opens.
-# A vX.Y.Z-dry.N tag is a dry run. A tag that contains "snapshot" publishes a snapshot.
+# A push to main, or to a maintenance branch of an older line such as 0.5.x, releases when it raises the
+# version in packages/core/package.json: a "Release vX.Y.Z" commit, pushed by `bun run release` or
+# merged from the pull request that the release button opens. A vX.Y.Z-dry.N tag is a dry run. A tag
+# that contains "snapshot" publishes a snapshot.
 on:
   push:
-    branches: [main]
+    branches: [main, "[0-9]+.[0-9]+.x"]
     # Path filters do not apply to tag pushes.
     paths: [packages/core/package.json]
     tags:
@@ -35,12 +36,15 @@ jobs:
       fullTag: ${{ steps.extract.outputs.fullTag }}
       isDryRun: ${{ steps.extract.outputs.isDryRun }}
       releaseTitle: ${{ steps.extract.outputs.releaseTitle }}
+      makeLatest: ${{ steps.history.outputs.makeLatest || 'false' }}
+      previousTag: ${{ steps.history.outputs.previousTag }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      # Every push of packages/core/package.json to main runs this job. Only a version change needs Bun.
+      # Every push of packages/core/package.json to a release branch runs this job. Only a version change
+      # needs Bun.
       - name: Read versions
         id: versions
         if: github.ref_type == 'branch'
@@ -86,6 +90,11 @@ jobs:
               echo "release=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            # A maintenance branch releases only its own line.
+            if [[ "$GITHUB_REF_NAME" =~ ^([0-9]+)\.([0-9]+)\.x$ && "$CURRENT" != "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}."* ]]; then
+              echo "::error::$CURRENT is not a version of $GITHUB_REF_NAME"
+              exit 1
+            fi
             TAG="$CURRENT"
             IS_DRY_RUN=false
             VERSION="$TAG"
@@ -104,13 +113,13 @@ jobs:
           echo "Is Dry Run: $IS_DRY_RUN"
           echo "Release Title: $RELEASE_TITLE"
 
-      # main can move between opening a release pull request and merging it.
+      # The branch can move between opening a release pull request and merging it.
       - name: Wait for the checks of the previous commit
         if: steps.extract.outputs.isDryRun == 'false'
         env:
           BEFORE: ${{ github.event.before }}
           GH_TOKEN: ${{ github.token }}
-        run: bun scripts/release.ts wait-checks "$BEFORE"
+        run: bun scripts/release.ts wait-checks "$BEFORE" "$GITHUB_REF_NAME"
 
       # Before the build, so a release stops early when the tag cannot be created. Needs the "Main tags"
       # ruleset to allow creating v* tags. A tag already at this commit, from a rerun or pushed by hand,
@@ -129,6 +138,26 @@ jobs:
             echo "::error::$TAG already exists at $existing, not at $GITHUB_SHA"
             exit 1
           fi
+
+      # A patch of an older line is not the latest GitHub release, and its release notes start at the
+      # release before it, not at the latest release. npm-publish chooses the npm dist-tag the same way.
+      - name: Find the previous release
+        id: history
+        if: steps.extract.outputs.isDryRun == 'false'
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          set -euo pipefail
+          dist_tag=$(bun scripts/npm-publish.ts dist-tag "$VERSION")
+          previous_tag=$(
+            {
+              git ls-remote --tags --refs origin 'refs/tags/v*' | sed -n 's#.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$#\1#p'
+              echo "v$VERSION"
+            } | sort -uV | awk -v current="v$VERSION" '$0 == current { found = previous } { previous = $0 } END { print found }'
+          )
+          echo "npm dist-tag: $dist_tag. Previous release: ${previous_tag:-none}"
+          echo "makeLatest=$([ "$dist_tag" = latest ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "previousTag=$previous_tag" >> "$GITHUB_OUTPUT"
 
   # Version validation check
   validate-version:
@@ -562,6 +591,8 @@ jobs:
           # A release from main is not a tag push, so name the tag. The prepare job created it.
           tag_name: v${{ needs.prepare.outputs.fullTag }}
           name: ${{ needs.prepare.outputs.releaseTitle }}
+          make_latest: ${{ needs.prepare.outputs.makeLatest }}
+          previous_tag: ${{ needs.prepare.outputs.previousTag }}
           files: release-assets/*.zip
           generate_release_notes: true
           draft: false

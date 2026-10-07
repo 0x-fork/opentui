@@ -2,16 +2,16 @@ name: Build QRCode
 
 on:
   push:
-    branches: [main]
+    branches: [main, "[0-9]+.[0-9]+.x"]
   pull_request:
-    branches: [main]
+    branches: [main, "[0-9]+.[0-9]+.x"]
 
 permissions:
   contents: read
 
 concurrency:
-  # Each push to main gets its own group. In a shared group, the next push cancels a waiting run, and
-  # that commit gets no CI.
+  # Each push gets its own group. In a shared group, the next push cancels a waiting run, and that
+  # commit gets no CI.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

@@ -7,30 +7,32 @@ import { fileURLToPath } from "node:url"
 
 import { compareVersions, registryIntegrity } from "./npm-publish"
 
-// Releases main. release.yml publishes each commit on main that raises the version, so a release is
-// a "Release vX.Y.Z" commit on main, pushed directly or merged from a pull request.
+// Releases main, or a maintenance branch of an older release line such as 0.5.x. release.yml publishes
+// each commit on those branches that raises the version, so a release is a "Release vX.Y.Z" commit,
+// pushed directly or merged from a pull request. Run it on the branch to release.
 //
 //   bun run release <patch|minor|major|version> [--pr | --dry-run] [--no-watch]
 //
-// 1. Checks that main is checked out without uncommitted changes and matches origin/main.
+// 1. Checks that the branch has no uncommitted changes and matches its origin branch.
 // 2. Waits for the checks of that commit, and fails if one fails: the checks that the branch rules
 //    require, and every workflow run that the push to main started.
-// 3. Runs prepare-release, commits "Release vX.Y.Z", and pushes the commit to main. That needs the
-//    right to bypass the branch rules.
+// 3. Runs prepare-release, commits "Release vX.Y.Z", and pushes the commit to the branch. That needs
+//    the right to bypass the branch rules. A maintenance branch takes only versions of its line.
 // 4. Follows the release.yml run of the commit. Its publish job ends when npm serves every package,
 //    and this script reports that time.
 //
 // --pr pushes the commit to a release/vX.Y.Z branch and opens a pull request instead. Merging it
 // releases. The "Prepare Release" workflow, the release button, runs this mode.
 //
-// --dry-run tags the commit vX.Y.Z-dry.N and pushes only the tag. main does not change. The release
+// --dry-run tags the commit vX.Y.Z-dry.N and pushes only the tag. The branch does not change. The release
 // run builds and packs every package but publishes nothing to npm; it creates a GitHub prerelease.
 // --no-watch stops after the push.
 //
-//   bun scripts/release.ts wait-checks <sha>
+//   bun scripts/release.ts wait-checks <sha> [branch]
 //
-// Waits for the checks of one commit, as in step 2. release.yml runs it for the commit that a release
-// commit builds on, because main can move between opening a release pull request and merging it.
+// Waits for the checks of one commit on a branch, main by default, as in step 2. release.yml runs it
+// for the commit that a release commit builds on, because the branch can move between opening a
+// release pull request and merging it.
 
 type Mode = "push" | "pr" | "dry-run"
 
@@ -42,6 +44,8 @@ interface Options {
 
 interface Release {
   version: string
+  // The branch that releases it: main or a maintenance branch.
+  branch: string
   sha: string
   // The ref that was pushed, without refs/heads/ or refs/tags/.
   ref: string
@@ -63,6 +67,7 @@ interface CheckRun {
 interface WorkflowRun {
   id: number
   name: string
+  head_branch: string | null
   status: string
   conclusion: string | null
   head_sha: string
@@ -75,7 +80,8 @@ interface Job {
   conclusion: string | null
 }
 
-const BRANCH = "main"
+const MAIN = "main"
+const MAINTENANCE_BRANCH = /^(\d+)\.(\d+)\.x$/
 const RELEASE_WORKFLOW = "release.yml"
 const NPM_PUBLISH_JOB = "NPM Publish / publish"
 const RELEASE_TYPES = ["patch", "minor", "major"]
@@ -88,7 +94,7 @@ const RUN_START_TIMEOUT_MS = 3 * 60_000
 const RUN_TIMEOUT_MS = 60 * 60_000
 const USAGE = [
   "Usage: bun run release <patch|minor|major|version> [--pr | --dry-run] [--no-watch]",
-  "       bun scripts/release.ts wait-checks <sha>",
+  "       bun scripts/release.ts wait-checks <sha> [branch]",
 ].join("\n")
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -193,27 +199,29 @@ function remoteSha(ref: string): string | undefined {
   return git("ls-remote", "origin", ref).split(/\s+/)[0] || undefined
 }
 
-// Returns the commit of main.
-function checkMain(): string {
+// Returns the checked-out release branch and its commit.
+function checkBranch(): { branch: string; head: string } {
   let branch = ""
   try {
     branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
   } catch {}
-  if (branch !== BRANCH) throw new ReleaseError(`Check out ${BRANCH} to release. HEAD is ${branch || "detached"}.`)
+  if (branch !== MAIN && !MAINTENANCE_BRANCH.test(branch)) {
+    throw new ReleaseError(`Check out ${MAIN} or a maintenance branch such as 0.5.x. HEAD is ${branch || "detached"}.`)
+  }
   if (git("status", "--porcelain", "--untracked-files=no")) {
     throw new ReleaseError("Commit or stash the uncommitted changes first")
   }
   const head = git("rev-parse", "HEAD")
-  const remote = remoteSha(`refs/heads/${BRANCH}`)
+  const remote = remoteSha(`refs/heads/${branch}`)
   if (head !== remote) {
-    throw new ReleaseError(`Local ${BRANCH} is at ${short(head)} but origin/${BRANCH} is at ${short(remote)}`)
+    throw new ReleaseError(`Local ${branch} is at ${short(head)} but origin/${branch} is at ${short(remote)}`)
   }
-  return head
+  return { branch, head }
 }
 
-function requiredChecks(repo: string): RequiredCheck[] {
+function requiredChecks(repo: string, branch: string): RequiredCheck[] {
   const rules = gh<Array<{ type: string; parameters?: { required_status_checks?: RequiredCheck[] } }>>(
-    `repos/${repo}/rules/branches/${BRANCH}`,
+    `repos/${repo}/rules/branches/${branch}`,
   )
   return rules.flatMap((rule) =>
     rule.type === "required_status_checks" ? (rule.parameters?.required_status_checks ?? []) : [],
@@ -221,14 +229,17 @@ function requiredChecks(repo: string): RequiredCheck[] {
 }
 
 // Returns the checks that have not finished. Throws if one failed.
-function pendingChecks(repo: string, sha: string, required: readonly RequiredCheck[]): string[] {
+function pendingChecks(repo: string, sha: string, branch: string, required: readonly RequiredCheck[]): string[] {
   const checkRuns = ghList<CheckRun>(`repos/${repo}/commits/${sha}/check-runs?per_page=100`, ".check_runs[]")
+  // A maintenance branch starts at a commit of main, whose runs belong to main.
   const workflowRuns = ghList<WorkflowRun>(
-    `repos/${repo}/actions/runs?head_sha=${sha}&event=push&branch=${BRANCH}&per_page=100`,
+    `repos/${repo}/actions/runs?head_sha=${sha}&event=push&per_page=100`,
     ".workflow_runs[]",
-  )
+  ).filter((workflowRun) => workflowRun.head_branch === branch || workflowRun.head_branch === MAIN)
   const pending: string[] = []
   const failed: string[] = []
+  // Each push to a release branch starts CI, so no run means that it has not started yet.
+  if (workflowRuns.length === 0) pending.push("CI runs")
   for (const check of required) {
     const matches = checkRuns.filter(
       (checkRun) =>
@@ -253,12 +264,12 @@ function pendingChecks(repo: string, sha: string, required: readonly RequiredChe
   return [...new Set(pending)]
 }
 
-async function waitForChecks(repo: string, sha: string): Promise<void> {
+async function waitForChecks(repo: string, sha: string, branch: string): Promise<void> {
   let required: RequiredCheck[] | undefined
   let reported = ""
   await poll(`the checks of ${short(sha)}`, CHECKS_TIMEOUT_MS, () => {
-    required ??= requiredChecks(repo)
-    const pending = pendingChecks(repo, sha, required)
+    required ??= requiredChecks(repo, branch)
+    const pending = pendingChecks(repo, sha, branch, required)
     if (pending.length === 0) return true
     const summary = pending.join(", ")
     if (summary !== reported) console.log(`Waiting for ${pending.length} checks on ${short(sha)}: ${summary}`)
@@ -303,19 +314,20 @@ function push(ref: string, sha: string): void {
   }
 }
 
-// Undoes the release commit, tag, and branch. The working tree had no uncommitted changes before them.
-function restore(base: string, tag: string | undefined, branch: string | undefined): void {
-  console.error(`Restoring ${BRANCH} to ${short(base)}`)
-  git("switch", "--quiet", "--force", BRANCH)
+// Undoes the release commit, tag, and pull request branch. The working tree had no uncommitted changes
+// before them.
+function restore(branch: string, base: string, tag: string | undefined, prBranch: string | undefined): void {
+  console.error(`Restoring ${branch} to ${short(base)}`)
+  git("switch", "--quiet", "--force", branch)
   git("reset", "--quiet", "--hard", base)
   if (tag) spawnSync("git", ["tag", "--delete", tag], { cwd: repoRoot, stdio: "ignore" })
-  if (branch) spawnSync("git", ["branch", "--delete", "--force", branch], { cwd: repoRoot, stdio: "ignore" })
+  if (prBranch) spawnSync("git", ["branch", "--delete", "--force", prBranch], { cwd: repoRoot, stdio: "ignore" })
 }
 
-async function pushRelease(options: Options, base: string): Promise<Release> {
+async function pushRelease(options: Options, branch: string, base: string): Promise<Release> {
   const previous = coreVersion()
   let tag: string | undefined
-  let branch: string | undefined
+  let prBranch: string | undefined
   let interrupted = false
   const onInterrupt = () => {
     interrupted = true
@@ -325,7 +337,7 @@ async function pushRelease(options: Options, base: string): Promise<Release> {
   }
   process.on("SIGINT", onInterrupt)
   try {
-    // A dry run commits on a detached HEAD, so main does not change.
+    // A dry run commits on a detached HEAD, so the branch does not change.
     if (options.mode === "dry-run") git("switch", "--quiet", "--detach")
     const prepareArgs = RELEASE_TYPES.includes(options.target) ? [`--${options.target}`] : [options.target]
     console.log(`Running prepare-release ${prepareArgs[0]}...`)
@@ -335,7 +347,11 @@ async function pushRelease(options: Options, base: string): Promise<Release> {
     const version = coreVersion()
     // npm moves the latest tag to each published version, older or not.
     if (compareVersions(version, previous) <= 0) {
-      throw new ReleaseError(`${version} is not newer than ${previous}, the version on ${BRANCH}`)
+      throw new ReleaseError(`${version} is not newer than ${previous}, the version on ${branch}`)
+    }
+    const line = MAINTENANCE_BRANCH.exec(branch)
+    if (line && !version.startsWith(`${line[1]}.${line[2]}.`)) {
+      throw new ReleaseError(`${version} is not a version of ${branch}`)
     }
     if (remoteSha(`refs/tags/v${version}`)) throw new ReleaseError(`Tag v${version} already exists on origin`)
     if ((await registryIntegrity("@opentui/core", version)) !== undefined) {
@@ -347,7 +363,7 @@ async function pushRelease(options: Options, base: string): Promise<Release> {
       const name = `release/v${version}`
       if (remoteSha(`refs/heads/${name}`)) throw new ReleaseError(`Branch ${name} already exists on origin`)
       git("switch", "--quiet", "--create", name)
-      branch = name
+      prBranch = name
     }
     stopIfInterrupted()
 
@@ -361,15 +377,15 @@ async function pushRelease(options: Options, base: string): Promise<Release> {
     const sha = git("rev-parse", "HEAD")
     stopIfInterrupted()
 
-    const ref = tag ?? branch ?? BRANCH
+    const ref = tag ?? prBranch ?? branch
     push(tag ? `refs/tags/${tag}` : `HEAD:refs/heads/${ref}`, sha)
-    const release = { version, sha, ref, pushedAt: Date.now() }
-    if (options.mode !== "push") git("switch", "--quiet", BRANCH)
-    if (branch) git("branch", "--quiet", "--delete", "--force", branch)
+    const release = { version, branch, sha, ref, pushedAt: Date.now() }
+    if (options.mode !== "push") git("switch", "--quiet", branch)
+    if (prBranch) git("branch", "--quiet", "--delete", "--force", prBranch)
     return release
   } catch (error) {
     try {
-      restore(base, tag, branch)
+      restore(branch, base, tag, prBranch)
     } catch (restoreError) {
       console.error(restoreError instanceof Error ? restoreError.message : restoreError)
     }
@@ -392,7 +408,7 @@ async function findReleaseRun(repo: string, release: Release): Promise<WorkflowR
 // do not run on them.
 function openPullRequest(repo: string, release: Release): string {
   const body = [
-    `Merging this pull request releases v${release.version}. release.yml publishes each commit on ${BRANCH} that raises the version.`,
+    `Merging this pull request releases v${release.version}. release.yml publishes each commit on ${release.branch} that raises the version.`,
     "",
     "This commit changes only versions. Before it builds, release.yml waits for the checks of the commit that this one is merged onto.",
   ].join("\n")
@@ -400,7 +416,7 @@ function openPullRequest(repo: string, release: Release): string {
     return ghPost<{ html_url: string }>(`repos/${repo}/pulls`, {
       title: `Release v${release.version}`,
       head: release.ref,
-      base: BRANCH,
+      base: release.branch,
       body,
     }).html_url
   } catch (error) {
@@ -452,20 +468,20 @@ function report(lines: readonly string[]): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
   if (args[0] === "wait-checks") {
-    if (args.length !== 2) throw new ReleaseError(USAGE)
-    await waitForChecks(githubRepo(), args[1]!)
+    if (args.length < 2 || args.length > 3) throw new ReleaseError(USAGE)
+    await waitForChecks(githubRepo(), args[1]!, args[2] ?? MAIN)
     return
   }
 
   const options = parseOptions(args)
   const repo = githubRepo()
-  const base = checkMain()
-  console.log(`Releasing ${repo} ${BRANCH} at ${short(base)}: ${options.target}, ${options.mode}`)
+  const { branch, head: base } = checkBranch()
+  console.log(`Releasing ${repo} ${branch} at ${short(base)}: ${options.target}, ${options.mode}`)
 
-  await waitForChecks(repo, base)
-  if (checkMain() !== base) throw new ReleaseError(`${BRANCH} moved while the checks ran. Release again.`)
+  await waitForChecks(repo, base, branch)
+  if (checkBranch().head !== base) throw new ReleaseError(`${branch} moved while the checks ran. Release again.`)
 
-  const release = await pushRelease(options, base)
+  const release = await pushRelease(options, branch, base)
   console.log(`Pushed Release v${release.version} (${short(release.sha)}) to ${release.ref}`)
   if (options.mode === "pr") {
     const url = openPullRequest(repo, release)

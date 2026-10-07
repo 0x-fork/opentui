@@ -130,7 +130,20 @@ export async function publishedState(directory: string): Promise<PublishedState>
   return remote === localIntegrity(directory) ? "identical" : "different"
 }
 
-export async function publishPackage(directory: string): Promise<void> {
+// The npm dist-tag for a release. `npm publish` moves the tag to the version it publishes, so a version
+// older than the latest release, a patch of an older line, goes to latest-X.Y instead of latest.
+export async function distTag(version: string): Promise<string> {
+  if (isSnapshotVersion(version)) return "snapshot"
+  const name = RELEASE_PACKAGES[0]!.name
+  const response = await fetch(packageUrl(name), { headers: { accept: "application/vnd.npm.install-v1+json" } })
+  if (!response.ok) throw new Error(`npm registry returned ${response.status} for ${name}`)
+  const latest = ((await response.json()) as { "dist-tags"?: { latest?: string } })["dist-tags"]?.latest
+  if (latest === undefined || compareVersions(version, latest) >= 0) return "latest"
+  const [major, minor] = version.split(".")
+  return `latest-${major}.${minor}`
+}
+
+export async function publishPackage(directory: string, tag: string): Promise<void> {
   const { name, version } = readPackageJson(directory)
   const state = await publishedState(directory)
   if (state === "identical") {
@@ -139,8 +152,8 @@ export async function publishPackage(directory: string): Promise<void> {
   }
   if (state === "different") throw new Error(`${name}@${version} is already on npm with different contents`)
 
-  const args = ["publish", "--access=public", ...(isSnapshotVersion(version) ? ["--tag", "snapshot"] : [])]
-  console.log(`\nPublishing ${name}@${version}${isSnapshotVersion(version) ? " (--tag snapshot)" : ""}...`)
+  const args = ["publish", "--access=public", "--tag", tag]
+  console.log(`\nPublishing ${name}@${version} (--tag ${tag})...`)
   const result = spawnSync("npm", args, { cwd: directory, stdio: "inherit" })
   if (result.status !== 0) throw new Error(`Failed to publish ${name}@${version}`)
   console.log(`Successfully published ${name}@${version}`)
@@ -198,14 +211,21 @@ export async function waitUntilServed(directories: readonly string[]): Promise<v
 async function main(): Promise<void> {
   const [command, ...names] = process.argv.slice(2)
   if (command === "publish") {
-    for (const directory of publishDirs(names)) await publishPackage(directory)
+    const directories = publishDirs(names)
+    // Release packages share one version, so they share one tag.
+    const tag = await distTag(readPackageJson(directories[0]!).version)
+    for (const directory of directories) await publishPackage(directory, tag)
     return
   }
   if (command === "wait") {
     await waitUntilServed(publishDirs(names))
     return
   }
-  throw new Error("Usage: npm-publish.ts <publish|wait> [package...]")
+  if (command === "dist-tag" && names.length === 1) {
+    console.log(await distTag(names[0]!))
+    return
+  }
+  throw new Error("Usage: npm-publish.ts <publish|wait> [package...]\n       npm-publish.ts dist-tag <version>")
 }
 
 const entry = process.argv[1]

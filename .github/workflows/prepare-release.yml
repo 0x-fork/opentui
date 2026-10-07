@@ -1,7 +1,8 @@
 name: Prepare Release
 
 # The release button. Waits for the checks of main, then opens a "Release vX.Y.Z" pull request.
-# Merging it releases: release.yml publishes each commit on main that raises the version.
+# Merging it releases: release.yml publishes each commit on main that raises the version. To release a
+# maintenance branch of an older line, such as 0.5.x, choose it under "Use workflow from".
 #
 # A pull request opened with GITHUB_TOKEN starts no workflows, so the required checks do not run on
 # it, and merging it needs the right to bypass the branch rules. The commit changes only versions, and
