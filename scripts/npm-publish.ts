@@ -86,7 +86,7 @@ export function localIntegrity(directory: string): string {
   return integrity
 }
 
-async function registryIntegrity(name: string, version: string): Promise<string | undefined> {
+export async function registryIntegrity(name: string, version: string): Promise<string | undefined> {
   const response = await fetch(`${packageUrl(name)}/${version}`, { headers: { accept: "application/json" } })
   if (response.status === 404) return undefined
   if (!response.ok) throw new Error(`npm registry returned ${response.status} for ${name}@${version}`)
