@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 
 import { compareVersions, registryIntegrity } from "./npm-publish"
 
-// Releases main. release.yml publishes each commit on main that changes the version, so a release is
+// Releases main. release.yml publishes each commit on main that raises the version, so a release is
 // a "Release vX.Y.Z" commit on main, pushed directly or merged from a pull request.
 //
 //   bun run release <patch|minor|major|version> [--pr | --dry-run] [--no-watch]
@@ -392,7 +392,7 @@ async function findReleaseRun(repo: string, release: Release): Promise<WorkflowR
 // do not run on them.
 function openPullRequest(repo: string, release: Release): string {
   const body = [
-    `Merging this pull request releases v${release.version}. release.yml publishes each commit on ${BRANCH} that changes the version.`,
+    `Merging this pull request releases v${release.version}. release.yml publishes each commit on ${BRANCH} that raises the version.`,
     "",
     "This commit changes only versions. Before it builds, release.yml waits for the checks of the commit that this one is merged onto.",
   ].join("\n")
@@ -492,15 +492,16 @@ async function main(): Promise<void> {
     ])
     throw new ReleaseError(`The release run of ${tag} ended with ${finished.conclusion}`)
   }
+  // A run whose prepare job saw no release skips every other job and still succeeds.
+  if (npmDoneAt === undefined) {
+    report([`Release ${tag} did not run`, `- Release run: ${finished.html_url}`])
+    throw new ReleaseError(`The release run of ${tag} skipped the publish job`)
+  }
   report([
     dryRun ? `Dry run ${tag} passed` : `Released ${tag}`,
-    ...(npmDoneAt === undefined
-      ? []
-      : [
-          dryRun
-            ? `- Packages packed ${elapsed(npmDoneAt)} after the push`
-            : `- npm serves every package ${elapsed(npmDoneAt)} after the push`,
-        ]),
+    dryRun
+      ? `- Packages packed ${elapsed(npmDoneAt)} after the push`
+      : `- npm serves every package ${elapsed(npmDoneAt)} after the push`,
     `- Release run finished ${elapsed(Date.now())} after the push: ${finished.html_url}`,
     `- GitHub release: https://github.com/${repo}/releases/tag/${tag}`,
   ])

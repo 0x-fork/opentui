@@ -100,7 +100,7 @@ Next steps:
 1. Review the changes: git diff
 2. Commit the changes: git add -A && git commit -m "Release v${version}"
 3. Get the commit onto main, pushed or through a pull request. release.yml releases each commit on
-   main that changes the version, and creates the v${version} tag.
+   main that raises the version, and creates the v${version} tag.
 
 \`bun run release\` does all of this and follows the release.
   `)
