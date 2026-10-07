@@ -130,8 +130,9 @@ export async function publishedState(directory: string): Promise<PublishedState>
   return remote === localIntegrity(directory) ? "identical" : "different"
 }
 
-// The npm dist-tag for a release. `npm publish` moves the tag to the version it publishes, so a version
-// older than the latest release, a patch of an older line, goes to latest-X.Y instead of latest.
+// The npm dist-tag when NPM_DIST_TAG is not set: for snapshots, and publishes run by hand. `npm publish`
+// moves the tag to the version it publishes, so a version older than the latest release, a patch of an
+// older line, goes to latest-X.Y instead of latest.
 export async function distTag(version: string): Promise<string> {
   if (isSnapshotVersion(version)) return "snapshot"
   const name = RELEASE_PACKAGES[0]!.name
@@ -212,8 +213,9 @@ async function main(): Promise<void> {
   const [command, ...names] = process.argv.slice(2)
   if (command === "publish") {
     const directories = publishDirs(names)
-    // Release packages share one version, so they share one tag.
-    const tag = await distTag(readPackageJson(directories[0]!).version)
+    // release.yml decides the tag of a release from the release tags. Release packages share one
+    // version, so they share one tag.
+    const tag = process.env.NPM_DIST_TAG || (await distTag(readPackageJson(directories[0]!).version))
     for (const directory of directories) await publishPackage(directory, tag)
     return
   }
@@ -221,11 +223,7 @@ async function main(): Promise<void> {
     await waitUntilServed(publishDirs(names))
     return
   }
-  if (command === "dist-tag" && names.length === 1) {
-    console.log(await distTag(names[0]!))
-    return
-  }
-  throw new Error("Usage: npm-publish.ts <publish|wait> [package...]\n       npm-publish.ts dist-tag <version>")
+  throw new Error("Usage: npm-publish.ts <publish|wait> [package...]")
 }
 
 const entry = process.argv[1]

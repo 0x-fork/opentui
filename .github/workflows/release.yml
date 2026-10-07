@@ -36,6 +36,7 @@ jobs:
       fullTag: ${{ steps.extract.outputs.fullTag }}
       isDryRun: ${{ steps.extract.outputs.isDryRun }}
       releaseTitle: ${{ steps.extract.outputs.releaseTitle }}
+      distTag: ${{ steps.history.outputs.distTag }}
       makeLatest: ${{ steps.history.outputs.makeLatest || 'false' }}
       previousTag: ${{ steps.history.outputs.previousTag }}
 
@@ -52,9 +53,15 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          git fetch --quiet --no-tags --depth=1 origin "$BEFORE"
-          previous=$(git show "$BEFORE:packages/core/package.json" | jq -r .version)
           current=$(jq -r .version packages/core/package.json)
+          # A push that creates a branch, such as a new maintenance branch, has no previous commit.
+          if [[ "$BEFORE" =~ ^0+$ ]]; then
+            echo "A new branch is not a release"
+            previous=$current
+          else
+            git fetch --quiet --no-tags --depth=1 origin "$BEFORE"
+            previous=$(git show "$BEFORE:packages/core/package.json" | jq -r .version)
+          fi
           echo "previous=$previous" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
 
@@ -139,8 +146,9 @@ jobs:
             exit 1
           fi
 
-      # A patch of an older line is not the latest GitHub release, and its release notes start at the
-      # release before it, not at the latest release. npm-publish chooses the npm dist-tag the same way.
+      # The newest release goes to npm's latest tag and is the latest GitHub release. A patch of an older
+      # line goes to latest-X.Y instead, and its release notes start at the release before it. Every
+      # release tags its commit before it builds, so concurrent releases see each other here.
       - name: Find the previous release
         id: history
         if: steps.extract.outputs.isDryRun == 'false'
@@ -148,14 +156,15 @@ jobs:
           VERSION: ${{ steps.extract.outputs.version }}
         run: |
           set -euo pipefail
-          dist_tag=$(bun scripts/npm-publish.ts dist-tag "$VERSION")
-          previous_tag=$(
-            {
-              git ls-remote --tags --refs origin 'refs/tags/v*' | sed -n 's#.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$#\1#p'
-              echo "v$VERSION"
-            } | sort -uV | awk -v current="v$VERSION" '$0 == current { found = previous } { previous = $0 } END { print found }'
-          )
+          tags=$(git ls-remote --tags --refs origin 'refs/tags/v*' | sed -n 's#.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$#\1#p' | sort -V)
+          previous_tag=$(echo "$tags" | awk -v current="v$VERSION" '$0 == current { print previous } { previous = $0 }')
+          if [ "$(echo "$tags" | tail -n 1)" = "v$VERSION" ]; then
+            dist_tag=latest
+          else
+            dist_tag="latest-${VERSION%.*}"
+          fi
           echo "npm dist-tag: $dist_tag. Previous release: ${previous_tag:-none}"
+          echo "distTag=$dist_tag" >> "$GITHUB_OUTPUT"
           echo "makeLatest=$([ "$dist_tag" = latest ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "previousTag=$previous_tag" >> "$GITHUB_OUTPUT"
 
@@ -269,6 +278,7 @@ jobs:
       isDryRun: ${{ needs.prepare.outputs.isDryRun == 'true' }}
       npmPackagesArtifact: ${{ needs.sign-windows-artifacts.outputs.npmPackagesArtifact }}
       smokeTest: false
+      distTag: ${{ needs.prepare.outputs.distTag }}
 
   sign-windows-artifacts:
     name: Sign Windows DLL Artifacts

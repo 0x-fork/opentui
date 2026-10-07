@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      distTag:
+        description: "npm dist-tag to publish under. When empty, npm-publish.ts chooses it."
+        required: false
+        type: string
+        default: ""
 permissions:
   contents: read
   id-token: write
@@ -134,3 +139,4 @@ jobs:
           echo "=========================================="
         env:
           CI: true
+          NPM_DIST_TAG: ${{ inputs.distTag }}

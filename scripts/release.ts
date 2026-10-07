@@ -9,13 +9,14 @@ import { compareVersions, registryIntegrity } from "./npm-publish"
 
 // Releases main, or a maintenance branch of an older release line such as 0.5.x. release.yml publishes
 // each commit on those branches that raises the version, so a release is a "Release vX.Y.Z" commit,
-// pushed directly or merged from a pull request. Run it on the branch to release.
+// pushed directly or merged from a pull request. Run it on the branch to release. A maintenance branch
+// must start at a release tag that has this script; the workflows of older tags do not release it.
 //
 //   bun run release <patch|minor|major|version> [--pr | --dry-run] [--no-watch]
 //
 // 1. Checks that the branch has no uncommitted changes and matches its origin branch.
 // 2. Waits for the checks of that commit, and fails if one fails: the checks that the branch rules
-//    require, and every workflow run that the push to main started.
+//    require, and every workflow run that pushes of that commit started.
 // 3. Runs prepare-release, commits "Release vX.Y.Z", and pushes the commit to the branch. That needs
 //    the right to bypass the branch rules. A maintenance branch takes only versions of its line.
 // 4. Follows the release.yml run of the commit. Its publish job ends when npm serves every package,
@@ -239,7 +240,7 @@ function pendingChecks(repo: string, sha: string, branch: string, required: read
   const pending: string[] = []
   const failed: string[] = []
   // Each push to a release branch starts CI, so no run means that it has not started yet.
-  if (workflowRuns.length === 0) pending.push("CI runs")
+  if (workflowRuns.length === 0) pending.push("a CI run (none started yet)")
   for (const check of required) {
     const matches = checkRuns.filter(
       (checkRun) =>
@@ -345,7 +346,6 @@ async function pushRelease(options: Options, branch: string, base: string): Prom
     stopIfInterrupted()
 
     const version = coreVersion()
-    // npm moves the latest tag to each published version, older or not.
     if (compareVersions(version, previous) <= 0) {
       throw new ReleaseError(`${version} is not newer than ${previous}, the version on ${branch}`)
     }

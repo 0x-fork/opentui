@@ -1,6 +1,6 @@
 name: Prepare Release
 
-# The release button. Waits for the checks of main, then opens a "Release vX.Y.Z" pull request.
+# The release button. Waits for the checks of the branch, then opens a "Release vX.Y.Z" pull request.
 # Merging it releases: release.yml publishes each commit on main that raises the version. To release a
 # maintenance branch of an older line, such as 0.5.x, choose it under "Use workflow from".
 #
