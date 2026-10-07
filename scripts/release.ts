@@ -5,7 +5,7 @@ import process from "node:process"
 import { setTimeout as sleep } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 
-import { registryIntegrity } from "./npm-publish"
+import { compareVersions, registryIntegrity } from "./npm-publish"
 
 // Releases main. release.yml publishes each commit on main that changes the version, so a release is
 // a "Release vX.Y.Z" commit on main, pushed directly or merged from a pull request.
@@ -23,8 +23,9 @@ import { registryIntegrity } from "./npm-publish"
 // --pr pushes the commit to a release/vX.Y.Z branch and opens a pull request instead. Merging it
 // releases. The "Prepare Release" workflow, the release button, runs this mode.
 //
-// --dry-run tags the commit vX.Y.Z-dry.N and pushes only the tag. main does not change, and the
-// release run builds and packs every package but publishes nothing. --no-watch stops after the push.
+// --dry-run tags the commit vX.Y.Z-dry.N and pushes only the tag. main does not change. The release
+// run builds and packs every package but publishes nothing to npm; it creates a GitHub prerelease.
+// --no-watch stops after the push.
 //
 //   bun scripts/release.ts wait-checks <sha>
 //
@@ -253,9 +254,10 @@ function pendingChecks(repo: string, sha: string, required: readonly RequiredChe
 }
 
 async function waitForChecks(repo: string, sha: string): Promise<void> {
-  const required = requiredChecks(repo)
+  let required: RequiredCheck[] | undefined
   let reported = ""
   await poll(`the checks of ${short(sha)}`, CHECKS_TIMEOUT_MS, () => {
+    required ??= requiredChecks(repo)
     const pending = pendingChecks(repo, sha, required)
     if (pending.length === 0) return true
     const summary = pending.join(", ")
@@ -269,34 +271,6 @@ async function waitForChecks(repo: string, sha: string): Promise<void> {
 function coreVersion(): string {
   return (JSON.parse(readFileSync(join(repoRoot, "packages", "core", "package.json"), "utf8")) as { version: string })
     .version
-}
-
-// Semver precedence: negative when left is older than right.
-function compareVersions(left: string, right: string): number {
-  const [leftCore = "", leftPre] = left.split(/-(.*)/)
-  const [rightCore = "", rightPre] = right.split(/-(.*)/)
-  const leftParts = leftCore.split(".").map(Number)
-  const rightParts = rightCore.split(".").map(Number)
-  for (let index = 0; index < 3; index++) {
-    const difference = leftParts[index]! - rightParts[index]!
-    if (difference !== 0) return difference
-  }
-  if (leftPre === undefined || rightPre === undefined)
-    return (leftPre === undefined ? 1 : 0) - (rightPre === undefined ? 1 : 0)
-  const leftIds = leftPre.split(".")
-  const rightIds = rightPre.split(".")
-  for (let index = 0; index < Math.max(leftIds.length, rightIds.length); index++) {
-    const leftId = leftIds[index]
-    const rightId = rightIds[index]
-    if (leftId === undefined || rightId === undefined) return leftId === undefined ? -1 : 1
-    if (leftId === rightId) continue
-    const leftNumeric = /^\d+$/.test(leftId)
-    const rightNumeric = /^\d+$/.test(rightId)
-    if (leftNumeric && rightNumeric) return Number(leftId) - Number(rightId)
-    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
-    return leftId < rightId ? -1 : 1
-  }
-  return 0
 }
 
 function nextDryRunTag(version: string): string {
@@ -367,18 +341,22 @@ async function pushRelease(options: Options, base: string): Promise<Release> {
     if ((await registryIntegrity("@opentui/core", version)) !== undefined) {
       throw new ReleaseError(`@opentui/core@${version} is already on npm`)
     }
+    // The branch and the tag are recorded only once created, so that a failure never deletes one that
+    // existed before.
     if (options.mode === "pr") {
-      branch = `release/v${version}`
-      if (remoteSha(`refs/heads/${branch}`)) throw new ReleaseError(`Branch ${branch} already exists on origin`)
-      git("switch", "--quiet", "--create", branch)
+      const name = `release/v${version}`
+      if (remoteSha(`refs/heads/${name}`)) throw new ReleaseError(`Branch ${name} already exists on origin`)
+      git("switch", "--quiet", "--create", name)
+      branch = name
     }
     stopIfInterrupted()
 
     console.log(`Prepared ${previous} -> ${version}. Committing...`)
     run("git", ["commit", "--quiet", "--all", "--message", `Release v${version}`], { inherit: true })
     if (options.mode === "dry-run") {
-      tag = nextDryRunTag(version)
-      run("git", ["tag", "--annotate", tag, "--message", `Release ${tag}`], { inherit: true })
+      const name = nextDryRunTag(version)
+      run("git", ["tag", "--annotate", name, "--message", `Release ${name}`], { inherit: true })
+      tag = name
     }
     const sha = git("rev-parse", "HEAD")
     stopIfInterrupted()

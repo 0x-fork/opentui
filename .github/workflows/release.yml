@@ -40,6 +40,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.1
+
       - name: Extract version and dry-run flag
         id: extract
         env:
@@ -57,15 +62,16 @@ jobs:
             TAG=$(jq -r .version packages/core/package.json)
             git fetch --quiet --no-tags --depth=1 origin "$BEFORE"
             PREVIOUS=$(git show "$BEFORE:packages/core/package.json" | jq -r .version)
-            if [ "$TAG" = "$PREVIOUS" ]; then
-              echo "The version is still $TAG, so this push is not a release"
+            # A version that does not go up, such as a reverted release commit, is not a release.
+            if ! TAG="$TAG" PREVIOUS="$PREVIOUS" bun -e 'import { compareVersions } from "./scripts/npm-publish.ts"; process.exit(compareVersions(process.env.TAG ?? "", process.env.PREVIOUS ?? "") > 0 ? 0 : 1)'; then
+              echo "The version went from $PREVIOUS to $TAG, so this push is not a release"
               echo "release=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             IS_DRY_RUN=false
             VERSION="$TAG"
             RELEASE_TITLE="Release v$TAG"
-            echo "The version changed from $PREVIOUS to $TAG. This is a PRODUCTION release"
+            echo "The version went from $PREVIOUS to $TAG. This is a PRODUCTION release"
           fi
 
           echo "release=true" >> "$GITHUB_OUTPUT"
@@ -79,27 +85,31 @@ jobs:
           echo "Is Dry Run: $IS_DRY_RUN"
           echo "Release Title: $RELEASE_TITLE"
 
-      - name: Setup Bun
-        if: steps.extract.outputs.release == 'true' && steps.extract.outputs.isDryRun == 'false'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.1
-
       # main can move between opening a release pull request and merging it.
       - name: Wait for the checks of the previous commit
-        if: steps.extract.outputs.release == 'true' && steps.extract.outputs.isDryRun == 'false'
+        if: steps.extract.outputs.isDryRun == 'false'
         env:
           BEFORE: ${{ github.event.before }}
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/release.ts wait-checks "$BEFORE"
 
-      # Before the build, so a release stops early when the tag cannot be created. A rerun finds the
-      # tag at this commit and continues. A tag pushed with GITHUB_TOKEN starts no workflow.
+      # Before the build, so a release stops early when the tag cannot be created. Needs the "Main tags"
+      # ruleset to allow creating v* tags. A tag already at this commit, from a rerun or pushed by hand,
+      # is kept. A tag pushed with GITHUB_TOKEN starts no workflow.
       - name: Tag the release commit
-        if: steps.extract.outputs.release == 'true' && steps.extract.outputs.isDryRun == 'false'
+        if: steps.extract.outputs.isDryRun == 'false'
         env:
           TAG: v${{ steps.extract.outputs.fullTag }}
-        run: git push origin "$GITHUB_SHA:refs/tags/$TAG"
+        run: |
+          set -euo pipefail
+          # The commit of the tag: an annotated tag lists it as the peeled ^{} line, which sorts last.
+          existing=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | sort -k2 | tail -n 1 | cut -f1)
+          if [ -z "$existing" ]; then
+            git push origin "$GITHUB_SHA:refs/tags/$TAG"
+          elif [ "$existing" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG already exists at $existing, not at $GITHUB_SHA"
+            exit 1
+          fi
 
   # Version validation check
   validate-version:
@@ -169,8 +179,8 @@ jobs:
       version: ${{ needs.prepare.outputs.fullTag }}
       npmPackagesArtifact: ${{ needs.sign-windows-artifacts.outputs.npmPackagesArtifact }}
 
-  # Tests the packages that npm-publish publishes. They do not load the Windows DLLs, the only files
-  # that signing changes, so they run while signing runs.
+  # Tests the packages before signing, so the tests run while signing runs. Signing replaces only the
+  # Windows DLLs, which the tests do not load, but it unzips and rezips every package on Windows.
   smoke-test:
     name: Smoke Test Packages
     if: ${{ needs.prepare.outputs.release == 'true' }}

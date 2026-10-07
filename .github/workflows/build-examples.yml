@@ -8,10 +8,9 @@ on:
         required: true
         type: string
       npmPackagesArtifact:
-        description: "Name of the npm packages artifact. Defaults to npm-packages-<version>."
-        required: false
+        description: "Name of the npm packages artifact"
+        required: true
         type: string
-        default: ""
 
 permissions:
   contents: read
@@ -41,7 +40,7 @@ jobs:
       - name: Download npm packages artifact
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.npmPackagesArtifact || format('npm-packages-{0}', inputs.version) }}
+          name: ${{ inputs.npmPackagesArtifact }}
 
       - name: Extract and install npm packages
         run: |

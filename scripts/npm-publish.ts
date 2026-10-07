@@ -70,6 +70,34 @@ export function publishDirs(names: readonly string[] = []): string[] {
   )
 }
 
+// Semver precedence: negative when left is older than right.
+export function compareVersions(left: string, right: string): number {
+  const [leftCore = "", leftPre] = left.split(/-(.*)/)
+  const [rightCore = "", rightPre] = right.split(/-(.*)/)
+  const leftParts = leftCore.split(".").map(Number)
+  const rightParts = rightCore.split(".").map(Number)
+  for (let index = 0; index < 3; index++) {
+    const difference = leftParts[index]! - rightParts[index]!
+    if (difference !== 0) return difference
+  }
+  if (leftPre === undefined || rightPre === undefined)
+    return (leftPre === undefined ? 1 : 0) - (rightPre === undefined ? 1 : 0)
+  const leftIds = leftPre.split(".")
+  const rightIds = rightPre.split(".")
+  for (let index = 0; index < Math.max(leftIds.length, rightIds.length); index++) {
+    const leftId = leftIds[index]
+    const rightId = rightIds[index]
+    if (leftId === undefined || rightId === undefined) return leftId === undefined ? -1 : 1
+    if (leftId === rightId) continue
+    const leftNumeric = /^\d+$/.test(leftId)
+    const rightNumeric = /^\d+$/.test(rightId)
+    if (leftNumeric && rightNumeric) return Number(leftId) - Number(rightId)
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
+    return leftId < rightId ? -1 : 1
+  }
+  return 0
+}
+
 function isSnapshotVersion(version: string): boolean {
   return version.includes("-snapshot") || /^0\.0\.0-\d{8}-[a-f0-9]{8}$/.test(version)
 }
