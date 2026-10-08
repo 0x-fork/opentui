@@ -565,7 +565,8 @@ fn detectNotificationProtocol(value: []const u8) ?NotificationProtocol {
         std.ascii.findIgnoreCase(value, "urxvt") != null or
         std.ascii.findIgnoreCase(value, "rxvt") != null or
         std.ascii.findIgnoreCase(value, "windows terminal") != null or
-        std.ascii.findIgnoreCase(value, "windows_terminal") != null)
+        std.ascii.findIgnoreCase(value, "windows_terminal") != null or
+        std.ascii.findIgnoreCase(value, "terminology") != null)
     {
         return .osc777;
     }
@@ -1463,7 +1464,8 @@ fn isHyperlinkTerm(value: []const u8) bool {
         std.ascii.findIgnoreCase(value, "alacritty") != null or
         std.ascii.findIgnoreCase(value, "foot") != null or
         std.ascii.findIgnoreCase(value, "iterm") != null or
-        std.ascii.findIgnoreCase(value, "xterm.js") != null;
+        std.ascii.findIgnoreCase(value, "xterm.js") != null or
+        std.ascii.findIgnoreCase(value, "terminology") != null;
 }
 
 fn isHyperlinkHostEnv(env_map: *const std.process.Environ.Map) bool {
