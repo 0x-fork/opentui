@@ -5,6 +5,7 @@ import { CliRenderEvents } from "../renderer.js"
 import { Renderable, RenderableEvents } from "../Renderable.js"
 import { BoxRenderable } from "../renderables/Box.js"
 import { CodeRenderable } from "../renderables/Code.js"
+import { EmbeddedTerminalRenderable } from "../renderables/EmbeddedTerminal.js"
 import { TextRenderable } from "../renderables/Text.js"
 import { SyntaxStyle } from "../syntax-style.js"
 import {
@@ -256,21 +257,46 @@ test.each(["frames", "suspend", "destroy"] as const)(
 )
 
 // A wide grapheme that does not fit the row starts the next one; native must count the rows the terminal uses.
+// A row that fills the width keeps its last cell (#1580). The footer starts below the empty row after the newline.
+// Old text on the start row (`~`) gives way to the right of a row, and only there. `{ red }` is a 9-cell writer row on a
+// red background that continues the last row, and "\n" ends its line; runs on a red background show in brackets.
 test.each([
-  ["ASCII", "abcdefghijklmnopqrs", 3],
-  ["wide characters", "一二三四五六七八九", 3],
-  ["a wide character at the last column", "abcdefgh一", 2],
-] as const)(
-  "a captured %s line that wraps advances the split footer by its terminal rows",
-  async (_name, line, rows) => {
-    const terminal = await setupTerminal({ columns: 9 })
-    const renderOffset = () => (terminal.renderer as unknown as { renderOffset: number }).renderOffset
-    const before = renderOffset()
-    terminal.stdout.write(line + "\n")
+  ["a captured ASCII line", ["abcdefghijklmnopqrs\n"], ["abcdefghi", "jklmnopqr", "s"]],
+  ["a captured line of wide characters", ["一二三四五六七八九\n"], ["一二三四", "五六七八", "九"]],
+  ["a captured wide character at the last column", ["abcdefgh一\n"], ["abcdefgh", "一"]],
+  ["a captured full-width ASCII line", ["012345678\n"], ["012345678"]],
+  ["a captured full-width line of wide characters", ["a一二三四\n"], ["a一二三四"]],
+  ["a captured short line", ["abc\n"], ["abc"]],
+  ["a captured line continued mid-row", ["ab", "cdefghijk\n"], ["abcdefghi", "jk"]],
+  [
+    "rows continued at the pinned bottom",
+    ["1\n2\n3\n4\n5\n6\n7\n8\n", "abcde", { red: "XXXXXX\n" }, "abcd", { red: "YY" }, "efg", "z\n"],
+    ["7", "8", "abcde[XXXX]", "[XX]", "abcd[YY]efg", "z"],
+  ],
+] as const)("%s shows its terminal rows above the split footer", async (_name, writes, rows) => {
+  const terminal = await setupTerminal({ columns: 9 })
+  terminal.renderer.root.add(new TextRenderable(terminal.renderer, { content: "F" }))
+  for (const write of writes) {
+    if (typeof write === "string") terminal.stdout.write(write)
+    else
+      terminal.renderer.writeToScrollback(({ renderContext }) => ({
+        root: new TextRenderable(renderContext, { content: write.red.trimEnd(), width: 9, height: 1, bg: "#ff0000" }),
+        startOnNewLine: false,
+        trailingNewline: write.red.endsWith("\n"),
+      }))
     await terminal.frame()
-    expect(renderOffset() - before).toBe(rows)
-  },
-)
+  }
+  const view = await createTestRenderer({ width: 9, height: 10 })
+  renderers.push(view.renderer)
+  const vt = new EmbeddedTerminalRenderable(view.renderer, { cols: 9, rows: 10 })
+  view.renderer.root.add(vt)
+  vt.write("~".repeat(9) + "\r" + terminal.stdout.text())
+  await view.renderOnce()
+  const screen = view
+    .captureSpans()
+    .lines.map(({ spans }) => spans.map((s) => (s.bg.r ? `[${s.text}]` : s.text)).join(""))
+  expect(screen.join("\n").replace(/ +$/gm, "").trimEnd()).toBe([...rows, "", "F"].join("\n"))
+})
 
 // Each commit is "text:rowColumns", plus "\n" when it ends its line.
 test.each([
