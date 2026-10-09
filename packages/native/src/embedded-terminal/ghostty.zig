@@ -50,6 +50,7 @@ pub const Mouse = struct {
     }
 };
 
+pub const KeyEncodeOptions = vt.input.KeyEncodeOptions;
 pub const MouseEncodeOptions = vt.input.MouseEncodeOptions;
 pub const encodeKey = vt.input.encodeKey;
 pub const encodeMouse = vt.input.encodeMouse;
