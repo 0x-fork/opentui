@@ -463,7 +463,7 @@ class ExternalOutputQueue {
     return this.commits.length
   }
 
-  writeSnapshots(commits: readonly ExternalOutputCommit[]): void {
+  writeSnapshots(commits: readonly ExternalOutputCommit[]): readonly QueuedCommit[] {
     // Every frame renders the queue head, so one invalid entry would fail every later frame and the close flush.
     for (const { rowColumns, snapshot } of commits) {
       if (!Number.isInteger(rowColumns) || rowColumns < 0 || rowColumns > snapshot.width) {
@@ -480,6 +480,7 @@ class ExternalOutputQueue {
       rowWidths: snapshotRowWidths(commit.snapshot, commit.rowColumns),
     }))
     for (const entry of entries) this.commits.push(entry)
+    return entries
   }
 
   /** The head commits, at most `limit`, that fit one native split render. Never empty unless the queue is. */
@@ -1041,6 +1042,8 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private _splitHeight: number = 0
   private renderOffset: number = 0
   private splitTailColumn: number = 0
+  // The tail after the last queued commit, so each captured write reads it in O(1); a reset or a resize voids it.
+  private queuedSplitTail: { column: number; width: number } | null = null
   private pendingSplitFooterTransition: PendingSplitFooterTransition | null = null
   // One-shot latch used to request a full split repaint after transitions
   // (resize/mode/output-path changes). Cleared after completed presentation.
@@ -2573,9 +2576,12 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   private getPendingSplitTailColumn(): number {
     const width = Math.max(this.width, 1)
+    const skipped = this.pendingNativeReplay?.remaining ?? 0
+    const cached = this.queuedSplitTail
+    if (this.externalOutputQueue.size > skipped && cached?.width === width) return cached.column
     let tailColumn = this.pendingNativeReplay ? 0 : this.splitTailColumn
 
-    for (const commit of this.externalOutputQueue.peek().slice(this.pendingNativeReplay?.remaining ?? 0)) {
+    for (const commit of this.externalOutputQueue.peek().slice(skipped)) {
       tailColumn = this.getSplitTailColumnAfterCommit(commit, tailColumn, width)
     }
 
@@ -2609,7 +2615,12 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
   private enqueueSplitCommits(commits: readonly ExternalOutputCommit[]): void {
     for (const commit of commits) commit.nativeSnapshot = commit.snapshot._getSceneHandle(this.nativeScene)
-    this.externalOutputQueue.writeSnapshots(commits)
+    const width = Math.max(this.width, 1)
+    let column = this.getPendingSplitTailColumn()
+    for (const entry of this.externalOutputQueue.writeSnapshots(commits)) {
+      column = this.getSplitTailColumnAfterCommit(entry, column, width)
+    }
+    this.queuedSplitTail = { column, width }
     this.requestRender()
     if (this.listenerCount(CliRenderEvents.EXTERNAL_OUTPUT) > 0) {
       for (const commit of commits) this.emit(CliRenderEvents.EXTERNAL_OUTPUT, commit)
@@ -2629,6 +2640,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     // Chunk rows at the renderer width in display cells, never inside a grapheme, so
     // each commit maps to one terminal row append and keeps every cell.
     const width = Math.max(1, this.width)
+    const tailColumn = this.getPendingSplitTailColumn()
     const rows: StdoutRow[] = []
     // Wrapped chunks of the current logical row start at this index; '\r' drops them.
     let rowStart = 0
@@ -2652,13 +2664,15 @@ export class CliRenderer extends EventEmitter implements RenderContext {
         continue
       }
 
-      // A tab advances to the next stop, as in a terminal, and never wraps.
-      const tabCells = Math.min(STDOUT_TAB_WIDTH - (cells % STDOUT_TAB_WIDTH), Math.max(0, width - cells))
+      // The first row of a write continues the terminal row at the tail column; native appends it there.
+      const column = (rows.length === 0 && tailColumn < width ? tailColumn : 0) + cells
+      // A tab advances to the next stop, as in a terminal, and stops at the last column.
+      const tabCells = Math.min(STDOUT_TAB_WIDTH - (column % STDOUT_TAB_WIDTH), Math.max(0, width - 1 - column))
       const grapheme = segment === "\t" ? " ".repeat(tabCells) : segment
       const graphemeCells = stringWidth(grapheme)
-      if (cells > 0 && cells + graphemeCells > width) {
-        // A wide grapheme that does not fit starts a terminal row; pad to the full width so native counts that row.
-        const padding = Math.max(0, width - cells)
+      if (column > 0 && column + graphemeCells > width) {
+        // A grapheme that does not fit starts a terminal row; pad a wide one's skipped cell so native counts the row.
+        const padding = Math.max(0, width - column)
         rows.push({ line: line + " ".repeat(padding), cells: cells + padding, trailingNewline: false })
         line = ""
         cells = 0
@@ -2795,6 +2809,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       pinnedRenderOffset: this.getSplitPinnedRenderOffset(),
     })
     this.splitTailColumn = 0
+    this.queuedSplitTail = null
   }
 
   private syncSplitScrollback(): void {
