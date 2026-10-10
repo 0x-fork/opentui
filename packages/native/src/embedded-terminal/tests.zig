@@ -239,15 +239,12 @@ test "embedded terminal exposes cursor state" {
 
     const terminal = try EmbeddedTerminal.init(std.testing.io, std.testing.allocator, .{ .cols = 20, .rows = 4 });
     defer terminal.deinit();
-    try terminal.write("\x1b[2;3H\x1b[5 q");
+    // Without its own color the cursor follows a foreground set by OSC 10 alone.
+    try terminal.write("\x1b]10;rgb:12/34/56\x07\x1b[2;3H\x1b[5 q");
     try terminal.compose(target, 0, 0);
 
-    const cursor = terminal.cursor();
-    try std.testing.expect(cursor.has_value);
-    try std.testing.expect(cursor.visible);
-    try std.testing.expectEqual(@as(u16, 2), cursor.x);
-    try std.testing.expectEqual(@as(u16, 1), cursor.y);
-    try std.testing.expectEqual(@as(u8, 0), cursor.style);
+    const expected: @import("main.zig").Cursor = .{ .x = 2, .y = 1, .has_value = true, .visible = true, .blinking = true, .style = 0, .color = .{ .r = 0x12, .g = 0x34, .b = 0x56 } };
+    try std.testing.expectEqual(expected, terminal.cursor());
 }
 
 test "embedded terminal supports lifecycle, resize, and viewport scroll" {
@@ -470,6 +467,8 @@ test "embedded terminal drains generated PTY responses incrementally" {
         .{ .query = "\x1b[c", .reply = "\x1b[?62;22c" },
         .{ .query = "\x1b[>c", .reply = "\x1b[>1;0;0c" },
         .{ .query = "\x1b[=c", .reply = "\x1bP!|00000000\x1b\\" },
+        .{ .query = "\x1b]10;?\x07", .reply = "\x1b]10;rgb:ffff/ffff/ffff\x07" },
+        .{ .query = "\x1b]11;?\x1b\\", .reply = "\x1b]11;rgb:0000/0000/0000\x1b\\" },
     };
     for (cases) |case| {
         try terminal.write(case.query);
@@ -536,16 +535,17 @@ test "embedded terminal composes a transparent default background as the termina
 
     const terminal = try EmbeddedTerminal.init(std.testing.io, std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer terminal.deinit();
-    try terminal.write("a\x1b[41mX");
+    // OSC 11 without OSC 10 still sets the default background.
+    try terminal.write("\x1b]11;rgb:ff/00/00\x1b\\a\x1b[41mX");
 
     try terminal.compose(target, 0, 0);
-    try std.testing.expectEqual(ansi.ColorIntent.rgb, ansi.intent(target.get(0, 0).?.bg));
+    try std.testing.expectEqual(ansi.rgbColor(255, 0, 0, 255), target.get(0, 0).?.bg);
 
     terminal.setTransparentBackground(true);
     try terminal.compose(target, 0, 0);
     // Text without an explicit background and the row tail cleared by clearRow both keep the intent.
-    try std.testing.expectEqual(ansi.ColorIntent.default, ansi.intent(target.get(0, 0).?.bg));
-    try std.testing.expectEqual(ansi.ColorIntent.default, ansi.intent(target.get(3, 0).?.bg));
+    try std.testing.expectEqual(ansi.defaultColor(255, 0, 0, 255), target.get(0, 0).?.bg);
+    try std.testing.expectEqual(ansi.defaultColor(255, 0, 0, 255), target.get(3, 0).?.bg);
     // An explicit background stays opaque.
     try std.testing.expectEqual(@as(u32, 'X'), target.get(1, 0).?.char);
     try std.testing.expect(ansi.intent(target.get(1, 0).?.bg) != ansi.ColorIntent.default);
