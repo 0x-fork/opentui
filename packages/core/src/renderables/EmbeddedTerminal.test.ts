@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createTestRenderer, type TestRendererSetup } from "../testing/test-renderer.js"
 import { KeyEvent } from "../lib/KeyHandler.js"
-import { parseKeypress } from "../lib/parse.keypress.js"
+import { nonAlphanumericKeys, parseKeypress } from "../lib/parse.keypress.js"
 import { RGBA } from "../lib/RGBA.js"
 import { resolveRenderLib } from "../zig.js"
 import { nativeSymbols, withStubbedSymbols } from "../tests/native-symbol-stubs.js"
@@ -202,12 +202,6 @@ describe("EmbeddedTerminalRenderable", () => {
     )
     expect(new TextDecoder().decode(terminal.encodeKey(keyEvent({ name: "😀", sequence: "😀" })))).toBe("😀")
     expect(new TextDecoder().decode(terminal.encodeKey(keyEvent({ name: "space", sequence: " " })))).toBe(" ")
-    expect(new TextDecoder().decode(terminal.encodeKey(keyEvent({ name: "up", sequence: "\x1b[A", code: "[A" })))).toBe(
-      "\x1b[A",
-    )
-    expect(
-      new TextDecoder().decode(terminal.encodeKey(keyEvent({ name: "down", sequence: "\x1b[B", code: "[B" }))),
-    ).toBe("\x1b[B")
     expect(
       new TextDecoder().decode(terminal.encodeKey(keyEvent({ name: "a", sequence: "A", shift: true, raw: "A" }))),
     ).toBe("A")
@@ -275,26 +269,30 @@ describe("EmbeddedTerminalRenderable", () => {
     }
   })
 
-  test("re-encodes Kitty character and escape keys for nested terminals", () => {
+  // Only "menu" encodes to nothing: Ghostty has no encoding for ContextMenu or the Kitty MENU key.
+  test.each([...new Set(nonAlphanumericKeys)])("encodes the parser key name %s", (name) => {
     const terminal = new EmbeddedTerminalRenderable(setup.renderer, { width: 20, height: 4 })
-    setup.renderer.root.add(terminal)
-    terminal.write("\x1b[>3u")
-
-    expect(
-      new TextDecoder().decode(
-        terminal.encodeKey(keyEvent({ name: "c", sequence: "c", raw: "\x1b[99;5u", source: "kitty", ctrl: true })),
-      ),
-    ).toBe("\x1b[99;5u")
-    expect(
-      new TextDecoder().decode(
-        terminal.encodeKey(
-          keyEvent({ name: "escape", sequence: "\x1b[27u", raw: "\x1b[27u", source: "kitty", code: "[27u" }),
-        ),
-      ),
-    ).toBe("\x1b[27u")
+    expect(terminal.encodeKey(keyEvent({ name, sequence: "" })).length > 0).toBe(name !== "menu")
   })
 
   test.each([
+    ["Kitty Ctrl+c", 3, "\x1b[99;5u", "\x1b[99;5u"],
+    ["Kitty Escape", 3, "\x1b[27u", "\x1b[27u"],
+    ["F5", 0, "\x1b[15~", "\x1b[15~"],
+    ["SS3 F1", 0, "\x1bOP", "\x1bOP"],
+    ["xterm Ctrl+F1", 0, "\x1b[1;5P", "\x1b[1;5P"],
+    ["xterm Alt+F1", 0, "\x1b[1;3P", "\x1b[1;3P"],
+    ["xterm Alt+F5", 0, "\x1b[15;3~", "\x1b[15;3~"],
+    ["Kitty F13", 1, "\x1b[57376u", "\x1b[57376u"],
+    ["Kitty F25", 1, "\x1b[57388u", "\x1b[57388u"],
+    ["SS3 Down", 0, "\x1bOB", "\x1b[B"],
+    ["SS3 keypad Begin", 0, "\x1bOE", "\x1b[E"],
+    ["keypad Begin into a DECKPAM child", "\x1b=", "\x1b[E", "\x1b[E"],
+    ["keypad Begin into a DECCKM child", "\x1b[?1h", "\x1b[E", "\x1bOE"],
+    ["xterm Ctrl+keypad Begin", 0, "\x1b[1;5E", "\x1b[1;5E"],
+    ["Kitty keypad Begin", 1, "\x1b[57427u", "\x1b[57427u"],
+    ["Kitty Ctrl+keypad Begin", 1, "\x1b[57427;5u", "\x1b[57427;5u"],
+    ["SS3 Up into a DECCKM child", "\x1b[?1h", "\x1bOA", "\x1bOA"],
     ["plain Dvorak u", 1, "\x1b[117::102;1u", "u"],
     ["plain Dvorak d", 1, "\x1b[100::104;1u", "d"],
     ["Dvorak Ctrl+U", 1, "\x1b[117::102;5u", "\x1b[117;5u"],
@@ -319,7 +317,7 @@ describe("EmbeddedTerminalRenderable", () => {
   ])("preserves %s", (_label, flags, raw, expected) => {
     const terminal = new EmbeddedTerminalRenderable(setup.renderer, { width: 20, height: 4 })
     setup.renderer.root.add(terminal)
-    terminal.write(`\x1b[>${flags}u`)
+    terminal.write(typeof flags === "string" ? flags : `\x1b[>${flags}u`)
 
     const parsed = parseKeypress(raw, { useKittyKeyboard: true })!
     expect(new TextDecoder().decode(terminal.encodeKey(new KeyEvent(parsed)))).toBe(expected)
